@@ -1,84 +1,90 @@
 // this example creates an array with 10 key-value (u32,f32) pairs and sorts them on the gpu
 use std::num::NonZeroU32;
 
-use wgpu_sort::{utils::{download_buffer, guess_workgroup_size, upload_to_buffer}, GPUSorter};
-
+use wgpu_sort::{
+    utils::{download_buffer, download_buffer2, guess_workgroup_size, upload_to_buffer},
+    GPUSorter,
+};
 
 #[pollster::main]
-async fn main(){
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+async fn main() {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
 
     let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
         .await
         .unwrap();
 
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                label: None,
-            },
-            None,
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        })
         .await
         .unwrap();
-    let subgroup_size = guess_workgroup_size(&device, &queue).await.expect("could not find a valid subgroup size");
+    let subgroup_size = guess_workgroup_size(&device, &queue)
+        .await
+        .expect("could not find a valid subgroup size");
     println!("using subgroup size {subgroup_size}");
     let sorter = GPUSorter::new(&device, subgroup_size);
 
-    let n = 10;
+    let n = 36;
     let sort_buffers = sorter.create_sort_buffers(&device, NonZeroU32::new(n).unwrap());
 
+    let keys_scrambled: Vec<u32> = vec![
+        65085, 130621, 196157, 261693, 327229, 392765, 458301, 523837, 589373, 65337, 130873,
+        196409, 261945, 327481, 393017, 458553, 524089, 589625, 130944, 196480, 327552, 393088,
+        65442, 130978, 196514, 262050, 327586, 393122, 458658, 524194, 589730, 589824, 589824,
+        589824, 589824, 589824,
+    ];
 
-    let keys_scrambled: Vec<u32> = (0..n).rev().collect();
+    let values_scrambled: Vec<u32> = keys_scrambled.iter().map(|v| 5).collect();
 
-    let values_scrambled:Vec<f32> = keys_scrambled.iter().map(|v|1./(*v as f32)).collect();
+    loop {
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
+        upload_to_buffer(
+            &mut encoder,
+            &sort_buffers.keys(),
+            &device,
+            keys_scrambled.as_slice(),
+        );
+        upload_to_buffer(
+            &mut encoder,
+            &sort_buffers.values(),
+            &device,
+            values_scrambled.as_slice(),
+        );
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: None,
-    });
+        println!(
+            "before: {:?}",
+            keys_scrambled
+                .iter()
+                .zip(values_scrambled.iter())
+                .collect::<Vec<(_, _)>>()
+        );
 
-    upload_to_buffer(
-        &mut encoder,
-        &sort_buffers.keys(),
-        &device,
-        keys_scrambled.as_slice(),
-    );
-    upload_to_buffer(
-        &mut encoder,
-        &sort_buffers.values(),
-        &device,
-        values_scrambled.as_slice(),
-    );
+        // sorter.sort(&mut encoder, &sort_buffers);
+        sorter.sort(&mut encoder, &queue, &sort_buffers, None);
 
-    println!("before: {:?}",keys_scrambled.iter().zip(values_scrambled.iter()).collect::<Vec<(_,_)>>());
+        // wait for sorter to finish
+        let idx = queue.submit([encoder.finish()]);
+        /*
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(idx),
+                timeout: None,
+            })
+            .unwrap();
+            */
 
-    // sorter.sort(&mut encoder, &sort_buffers);
-    sorter.sort(&mut encoder,&queue,&sort_buffers,None);
-
-    // wait for sorter to finish
-    let idx = queue.submit([encoder.finish()]);
-    device.poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
-
-    // keys buffer has padding at the end
-    // so we only download the "valid" data
-    let keys_sorted:Vec<u32> = download_buffer::<u32>(
-        &sort_buffers.keys(),
-        &device,
-        &queue,
-        0..sort_buffers.keys_valid_size(),
-    )
-    .await;
-    let value_sorted = download_buffer::<f32>(
-        &sort_buffers.values(),
-        &device,
-        &queue,
-        ..,
-    )
-    .await;
-
-    println!("after: {:?}",keys_sorted.iter().zip(value_sorted.iter()).collect::<Vec<(_,_)>>());
+        // keys buffer has padding at the end
+        // so we only download the "valid" data
+        download_buffer2(&sort_buffers.keys(), &device, &queue);
+        download_buffer2(&sort_buffers.values(), &device, &queue);
+    }
 }
-

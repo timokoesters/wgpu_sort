@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 use crate::GPUSorter;
 
 #[doc(hidden)]
-/// only used for testing 
+/// only used for testing
 /// temporally used for guessing subgroup size
 pub fn upload_to_buffer<T: bytemuck::Pod>(
     encoder: &mut wgpu::CommandEncoder,
@@ -25,7 +25,7 @@ pub fn upload_to_buffer<T: bytemuck::Pod>(
 }
 
 #[doc(hidden)]
-/// only used for testing 
+/// only used for testing
 /// temporally used for guessing subgroup size
 pub async fn download_buffer<T: Clone + bytemuck::Pod>(
     buffer: &wgpu::Buffer,
@@ -50,11 +50,46 @@ pub async fn download_buffer<T: Clone + bytemuck::Pod>(
     let buffer_slice = download_buffer.slice(range);
     let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
-    device.poll(wgpu::Maintain::Wait);
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .unwrap();
     rx.receive().await.unwrap().unwrap();
 
     let data = buffer_slice.get_mapped_range();
     return bytemuck::cast_slice(data.deref()).to_vec();
+}
+
+pub fn download_buffer2(buffer: &wgpu::Buffer, device: &wgpu::Device, queue: &wgpu::Queue) {
+    // copy buffer data
+    let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Download buffer"),
+        size: buffer.size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Copy encoder"),
+    });
+    encoder.copy_buffer_to_buffer(buffer, 0, &download_buffer, 0, buffer.size());
+    queue.submit([encoder.finish()]);
+
+    // Download buffer
+    download_buffer
+        .clone()
+        .map_async(wgpu::MapMode::Read, .., move |result| {
+            result.unwrap();
+            let data: Vec<u32> =
+                bytemuck::cast_slice(&*download_buffer.get_mapped_range(..)).to_vec();
+            let data = data.iter().take(3 * 3 * 4).collect::<Vec<_>>();
+            println!("{:?}", &data);
+            if data.contains(&&0) {
+                panic!();
+            }
+        });
+    // device.poll(wgpu::Maintain::Wait);
 }
 
 async fn test_sort(sorter: &GPUSorter, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
@@ -75,9 +110,14 @@ async fn test_sort(sorter: &GPUSorter, device: &wgpu::Device, queue: &wgpu::Queu
         scrambled_data.as_slice(),
     );
 
-    sorter.sort(&mut encoder, queue, &sort_buffers,None);
+    sorter.sort(&mut encoder, queue, &sort_buffers, None);
     let idx = queue.submit([encoder.finish()]);
-    device.poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(idx),
+            timeout: None,
+        })
+        .unwrap();
 
     let sorted = download_buffer::<f32>(
         &sort_buffers.keys(),
@@ -86,7 +126,10 @@ async fn test_sort(sorter: &GPUSorter, device: &wgpu::Device, queue: &wgpu::Queu
         0..sort_buffers.keys_valid_size(),
     )
     .await;
-    return sorted.into_iter().zip(sorted_data.into_iter()).all(|(a,b)|a==b);
+    return sorted
+        .into_iter()
+        .zip(sorted_data.into_iter())
+        .all(|(a, b)| a == b);
 }
 
 /// Function guesses the best subgroup size by testing the sorter with
